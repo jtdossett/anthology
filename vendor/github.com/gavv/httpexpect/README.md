@@ -17,13 +17,14 @@ Workflow:
 * URL path construction, with simple string interpolation provided by [`go-interpol`](https://github.com/imkira/go-interpol) package.
 * URL query parameters (encoding using [`go-querystring`](https://github.com/google/go-querystring) package).
 * Headers, cookies, payload: JSON,  urlencoded or multipart forms (encoding using [`form`](https://github.com/ajg/form) package), plain text.
-* Create custom [request builders](#reusable-builders) that can be reused.
+* Custom reusable [request builders](#reusable-builders).
 
 ##### Response assertions
 
 * Response status, predefined status ranges.
 * Headers, cookies, payload: JSON, JSONP, forms, text.
 * Round-trip time.
+* Custom reusable [response matchers](#reusable-matchers).
 
 ##### Payload assertions
 
@@ -31,6 +32,12 @@ Workflow:
 * Regular expressions.
 * Simple JSON queries (using subset of [JSONPath](http://goessner.net/articles/JsonPath/)), provided by [`jsonpath`](https://github.com/yalp/jsonpath) package.
 * [JSON Schema](http://json-schema.org/) validation, provided by [`gojsonschema`](https://github.com/xeipuuv/gojsonschema) package.
+
+##### WebSocket support (thanks to [@tyranron](https://github.com/tyranron))
+
+* Upgrade an HTTP connection to a WebSocket connection (we use [`gorilla/websocket`](https://github.com/gorilla/websocket) internally).
+* Interact with the WebSocket server.
+* Inspect WebSocket connection parameters and WebSocket messages.
 
 ##### Pretty printing
 
@@ -49,10 +56,10 @@ Workflow:
 
 Stable branches are available on [`gopkg.in`](http://labix.org/gopkg.in) and will not introduce backward-incompatible changes.
 
-Current stable branch is [`v1`](http://gopkg.in/gavv/httpexpect.v1):
+Current stable branch is [`v2`](http://gopkg.in/gavv/httpexpect.v2):
 
 ```go
-import "gopkg.in/gavv/httpexpect.v1"
+import "gopkg.in/gavv/httpexpect.v2"
 ```
 
 Development is done in `master` branch on github:
@@ -60,6 +67,8 @@ Development is done in `master` branch on github:
 ```go
 import "github.com/gavv/httpexpect"
 ```
+
+When the master is merged into a stable branch, a new version tag is assigned to the branch head. The versions are selected according to the [semantic versioning](https://semver.org/) scheme.
 
 ## Documentation
 
@@ -84,6 +93,10 @@ See [`_examples`](_examples) directory for complete standalone examples.
 * [`fasthttp_test.go`](_examples/fasthttp_test.go)
 
     Testing a server made with [`fasthttp`](https://github.com/valyala/fasthttp) package. Tests invoke the `fasthttp.RequestHandler` directly.
+
+* [`websocket_test.go`](_examples/websocket_test.go)
+
+    Testing a WebSocket server based on [`gorilla/websocket`](https://github.com/gorilla/websocket). Tests invoke the `http.Handler` or `fasthttp.RequestHandler` directly.
 
 * [`gae_test.go`](_examples/gae_test.go)
 
@@ -297,12 +310,30 @@ m.Name("user").Equal("john")
 
 ```go
 e.GET("/path").WithURL("http://example.com").
-   Expect().
-   Status(http.StatusOK)
+	Expect().
+	Status(http.StatusOK)
 
 e.GET("/path").WithURL("http://subdomain.example.com").
-   Expect().
-   Status(http.StatusOK)
+	Expect().
+	Status(http.StatusOK)
+```
+
+##### WebSocket support
+
+```go
+ws := e.GET("/mysocket").WithWebsocketUpgrade().
+	Expect().
+	Status(http.StatusSwitchingProtocols).
+	Websocket()
+defer ws.Disconnect()
+
+ws.WriteText("some request").
+	Expect().
+	TextMessage().Body().Equal("some response")
+
+ws.CloseWithText("bye").
+	Expect().
+	CloseMessage().NoContent()
 ```
 
 ##### Reusable builders
@@ -321,12 +352,31 @@ auth := e.Builder(func (req *httpexpect.Request) {
 })
 
 auth.GET("/restricted").
-   Expect().
-   Status(http.StatusOK)
+	Expect().
+	Status(http.StatusOK)
 
 e.GET("/restricted").
-   Expect().
-   Status(http.StatusUnauthorized)
+	Expect().
+	Status(http.StatusUnauthorized)
+```
+
+##### Reusable matchers
+
+```go
+e := httpexpect.New(t, "http://example.com")
+
+// every response should have this header
+m := e.Matcher(func (resp *httpexpect.Response) {
+	resp.Header("API-Version").NotEmpty()
+})
+
+m.GET("/some-path").
+	Expect().
+	Status(http.StatusOK)
+
+m.GET("/bad-path").
+	Expect().
+	Status(http.StatusNotFound)
 ```
 
 ##### Custom config
@@ -424,15 +474,13 @@ e.GET("/path").WithHandler(handler).
 ## Similar packages
 
 * [`gorequest`](https://github.com/parnurzeal/gorequest)
-* [`gabs`](https://github.com/Jeffail/gabs)
-* [`gofight`](https://github.com/appleboy/gofight)
 * [`baloo`](https://github.com/h2non/baloo)
+* [`gofight`](https://github.com/appleboy/gofight)
 * [`frisby`](https://github.com/verdverm/frisby)
 * [`forest`](https://github.com/emicklei/forest)
 * [`restit`](https://github.com/go-restit/restit)
-* [`supertest`](https://github.com/haoxins/supertest)
 * [`http-test`](https://github.com/vsco/http-test)
-* [`go-json-rest/rest/test`](https://godoc.org/github.com/ant0ine/go-json-rest/rest/test)
+* [`go-json-rest`](https://github.com/ant0ine/go-json-rest)
 
 ## Contributing
 

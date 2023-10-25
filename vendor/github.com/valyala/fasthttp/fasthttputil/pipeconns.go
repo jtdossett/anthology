@@ -8,7 +8,9 @@ import (
 	"time"
 )
 
-// NewPipeConns returns new bi-directonal connection pipe.
+// NewPipeConns returns new bi-directional connection pipe.
+//
+// PipeConns is NOT safe for concurrent use by multiple goroutines!
 func NewPipeConns() *PipeConns {
 	ch1 := make(chan *byteBuffer, 4)
 	ch2 := make(chan *byteBuffer, 4)
@@ -33,16 +35,32 @@ func NewPipeConns() *PipeConns {
 // PipeConns has the following additional features comparing to connections
 // returned from net.Pipe():
 //
-//   * It is faster.
-//   * It buffers Write calls, so there is no need to have concurrent goroutine
+//   - It is faster.
+//   - It buffers Write calls, so there is no need to have concurrent goroutine
 //     calling Read in order to unblock each Write call.
-//   * It supports read and write deadlines.
+//   - It supports read and write deadlines.
 //
+// PipeConns is NOT safe for concurrent use by multiple goroutines!
 type PipeConns struct {
 	c1         pipeConn
 	c2         pipeConn
 	stopCh     chan struct{}
 	stopChLock sync.Mutex
+}
+
+// SetAddresses sets the local and remote addresses for the connection.
+func (pc *PipeConns) SetAddresses(localAddr1, remoteAddr1, localAddr2, remoteAddr2 net.Addr) {
+	pc.c1.addrLock.Lock()
+	defer pc.c1.addrLock.Unlock()
+
+	pc.c2.addrLock.Lock()
+	defer pc.c2.addrLock.Unlock()
+
+	pc.c1.localAddr = localAddr1
+	pc.c1.remoteAddr = remoteAddr1
+
+	pc.c2.localAddr = localAddr2
+	pc.c2.remoteAddr = remoteAddr2
 }
 
 // Conn1 returns the first end of bi-directional pipe.
@@ -87,6 +105,12 @@ type pipeConn struct {
 
 	readDeadlineCh  <-chan time.Time
 	writeDeadlineCh <-chan time.Time
+
+	readDeadlineChLock sync.Mutex
+
+	localAddr  net.Addr
+	remoteAddr net.Addr
+	addrLock   sync.RWMutex
 }
 
 func (c *pipeConn) Write(p []byte) (int, error) {
@@ -158,10 +182,15 @@ func (c *pipeConn) readNextByteBuffer(mayBlock bool) error {
 		if !mayBlock {
 			return errWouldBlock
 		}
+		c.readDeadlineChLock.Lock()
+		readDeadlineCh := c.readDeadlineCh
+		c.readDeadlineChLock.Unlock()
 		select {
 		case c.b = <-c.rCh:
-		case <-c.readDeadlineCh:
+		case <-readDeadlineCh:
+			c.readDeadlineChLock.Lock()
 			c.readDeadlineCh = closedDeadlineCh
+			c.readDeadlineChLock.Unlock()
 			// rCh may contain data when deadline is reached.
 			// Read the data before returning ErrTimeout.
 			select {
@@ -187,26 +216,54 @@ func (c *pipeConn) readNextByteBuffer(mayBlock bool) error {
 var (
 	errWouldBlock       = errors.New("would block")
 	errConnectionClosed = errors.New("connection closed")
-
-	// ErrTimeout is returned from Read() or Write() on timeout.
-	ErrTimeout = errors.New("timeout")
 )
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string {
+	return "timeout"
+}
+
+// Only implement the Timeout() function of the net.Error interface.
+// This allows for checks like:
+//
+//	if x, ok := err.(interface{ Timeout() bool }); ok && x.Timeout() {
+func (e *timeoutError) Timeout() bool {
+	return true
+}
+
+// ErrTimeout is returned from Read() or Write() on timeout.
+var ErrTimeout = &timeoutError{}
 
 func (c *pipeConn) Close() error {
 	return c.pc.Close()
 }
 
 func (c *pipeConn) LocalAddr() net.Addr {
+	c.addrLock.RLock()
+	defer c.addrLock.RUnlock()
+
+	if c.localAddr != nil {
+		return c.localAddr
+	}
+
 	return pipeAddr(0)
 }
 
 func (c *pipeConn) RemoteAddr() net.Addr {
+	c.addrLock.RLock()
+	defer c.addrLock.RUnlock()
+
+	if c.remoteAddr != nil {
+		return c.remoteAddr
+	}
+
 	return pipeAddr(0)
 }
 
 func (c *pipeConn) SetDeadline(deadline time.Time) error {
-	c.SetReadDeadline(deadline)
-	c.SetWriteDeadline(deadline)
+	c.SetReadDeadline(deadline)  //nolint:errcheck
+	c.SetWriteDeadline(deadline) //nolint:errcheck
 	return nil
 }
 
@@ -214,7 +271,10 @@ func (c *pipeConn) SetReadDeadline(deadline time.Time) error {
 	if c.readDeadlineTimer == nil {
 		c.readDeadlineTimer = time.NewTimer(time.Hour)
 	}
-	c.readDeadlineCh = updateTimer(c.readDeadlineTimer, deadline)
+	readDeadlineCh := updateTimer(c.readDeadlineTimer, deadline)
+	c.readDeadlineChLock.Lock()
+	c.readDeadlineCh = readDeadlineCh
+	c.readDeadlineChLock.Unlock()
 	return nil
 }
 
@@ -236,7 +296,7 @@ func updateTimer(t *time.Timer, deadline time.Time) <-chan time.Time {
 	if deadline.IsZero() {
 		return nil
 	}
-	d := -time.Since(deadline)
+	d := time.Until(deadline)
 	if d <= 0 {
 		return closedDeadlineCh
 	}

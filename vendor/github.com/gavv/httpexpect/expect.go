@@ -71,6 +71,7 @@ import (
 	"net/http/cookiejar"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -79,6 +80,7 @@ import (
 type Expect struct {
 	config   Config
 	builders []func(*Request)
+	matchers []func(*Response)
 }
 
 // Config contains various settings.
@@ -101,6 +103,14 @@ type Config struct {
 	// You can use http.DefaultClient or http.Client, or provide
 	// custom implementation.
 	Client Client
+
+	// WebsocketDialer is used to establish websocket.Conn and receive
+	// http.Response of handshake result.
+	// Should not be nil.
+	//
+	// You can use websocket.DefaultDialer or websocket.Dialer, or provide
+	// custom implementation.
+	WebsocketDialer WebsocketDialer
 
 	// Reporter is used to report failures.
 	// Should not be nil.
@@ -128,10 +138,38 @@ type RequestFactory interface {
 }
 
 // Client is used to send http.Request and receive http.Response.
-// http.Client, Binder, and FastBinder implement this interface.
+// http.Client implements this interface.
+//
+// Binder and FastBinder may be used to obtain this interface implementation.
+//
+// Example:
+//  httpBinderClient := &http.Client{
+//    Transport: httpexpect.NewBinder(HTTPHandler),
+//  }
+//  fastBinderClient := &http.Client{
+//    Transport: httpexpect.NewFastBinder(FastHTTPHandler),
+//  }
 type Client interface {
 	// Do sends request and returns response.
 	Do(*http.Request) (*http.Response, error)
+}
+
+// WebsocketDialer is used to establish websocket.Conn and receive http.Response
+// of handshake result.
+// websocket.Dialer implements this interface.
+//
+// NewWebsocketDialer and NewFastWebsocketDialer may be used to obtain this
+// interface implementation.
+//
+// Example:
+//  e := httpexpect.WithConfig(httpexpect.Config{
+//    BaseURL:         "http://example.com",
+//    WebsocketDialer: httpexpect.NewWebsocketDialer(myHandler),
+//	})
+type WebsocketDialer interface {
+	// Dial establishes new WebSocket connection and returns response
+	// of handshake result.
+	Dial(url string, reqH http.Header) (*websocket.Conn, *http.Response, error)
 }
 
 // Printer is used to print requests and responses.
@@ -142,6 +180,22 @@ type Printer interface {
 
 	// Response is called after response is received.
 	Response(*http.Response, time.Duration)
+}
+
+// WebsocketPrinter is used to print writes and reads of WebSocket connection.
+//
+// If WebSocket connection is used, all Printers that also implement WebsocketPrinter
+// are invoked on every WebSocket message read or written.
+//
+// DebugPrinter implements this interface.
+type WebsocketPrinter interface {
+	Printer
+
+	// WebsocketWrite is called before writes to WebSocket connection.
+	WebsocketWrite(typ int, content []byte, closeCode int)
+
+	// WebsocketRead is called after reads from WebSocket connection.
+	WebsocketRead(typ int, content []byte, closeCode int)
 }
 
 // Logger is used as output backend for Printer.
@@ -219,6 +273,9 @@ func New(t LoggerReporter, baseURL string) *Expect {
 //      Jar: httpexpect.NewJar(),
 //  }
 //
+// If WebsocketDialer is nil, it's set to a default dialer:
+//  &websocket.Dialer{}
+//
 // Example:
 //  func TestSomething(t *testing.T) {
 //      e := httpexpect.WithConfig(httpexpect.Config{
@@ -250,9 +307,11 @@ func WithConfig(config Config) *Expect {
 			Jar: NewJar(),
 		}
 	}
+	if config.WebsocketDialer == nil {
+		config.WebsocketDialer = &websocket.Dialer{}
+	}
 	return &Expect{
-		config:   config,
-		builders: nil,
+		config: config,
 	}
 }
 
@@ -296,6 +355,30 @@ func (e *Expect) Builder(builder func(*Request)) *Expect {
 	return &ret
 }
 
+// Matcher returns a copy of Expect instance with given matcher attached to it.
+// Returned copy contains all previously attached matchers plus a new one.
+// Matchers are invoked from Request.Expect method, after retrieving a new response.
+//
+// Example:
+//  e := httpexpect.New(t, "http://example.com")
+//
+//  m := e.Matcher(func (resp *httpexpect.Response) {
+//      resp.Header("API-Version").NotEmpty()
+//  })
+//
+//  m.GET("/some-path").
+// 	    Expect().
+// 	    Status(http.StatusOK)
+//
+//  m.GET("/bad-path").
+// 	    Expect().
+// 	    Status(http.StatusNotFound)
+func (e *Expect) Matcher(matcher func(*Response)) *Expect {
+	ret := *e
+	ret.matchers = append(e.matchers, matcher)
+	return &ret
+}
+
 // Request returns a new Request object.
 // Arguments a similar to NewRequest.
 // After creating request, all builders attached to Expect object are invoked.
@@ -305,6 +388,10 @@ func (e *Expect) Request(method, path string, pathargs ...interface{}) *Request 
 
 	for _, builder := range e.builders {
 		builder(req)
+	}
+
+	for _, matcher := range e.matchers {
+		req.WithMatcher(matcher)
 	}
 
 	return req

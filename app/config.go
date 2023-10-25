@@ -1,19 +1,25 @@
 package app
 
 import (
+	"os"
+
 	"github.com/jessevdk/go-flags"
 	"github.com/sirupsen/logrus"
-	"os"
 )
 
 var Config = &CommonOptions{}
 
 type CommonOptions struct {
 	Port       int               `short:"p" long:"port" description:"Port the service listens on" default:"8080"`
-	Backend    string            `short:"b" long:"backend" choice:"s3" choice:"filesystem"`
+	Backend    string            `short:"b" long:"backend" choice:"s3" choice:"filesystem" choice:"oras"`
 	S3         S3Options         `group:"S3 configuration" namespace:"s3"`
 	FileSystem FileSystemOptions `group:"Filesystem configuration" namespace:"filesystem"`
 	SSLConfig  SSLOptions        `group:"SSL Configuration" namespace:"ssl"`
+	Oras       OrasOptions       `group:"Oras Configuration" namespace:"oras"`
+}
+
+type OrasOptions struct {
+	RegistryUrl string `long:"registryurl" description:"URL of the registry"`
 }
 
 type SSLOptions struct {

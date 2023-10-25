@@ -3,9 +3,10 @@ package registry
 import (
 	"bytes"
 	"errors"
-	"github.com/erikvanbrakel/anthology/models"
 	"io"
 	"strings"
+
+	"github.com/erikvanbrakel/anthology/models"
 )
 
 type InMemoryRegistry struct {
@@ -33,10 +34,10 @@ func (r *InMemoryRegistry) ListModules(namespace, name, provider string, offset,
 
 func (r *InMemoryRegistry) PublishModule(namespace, name, provider, version string, data io.Reader) error {
 	r.modules = append(r.modules, models.Module{
-		namespace,
-		name,
-		provider,
-		version,
+		Namespace: namespace,
+		Name:      name,
+		Provider:  provider,
+		Version:   version,
 	})
 
 	id := strings.Join([]string{namespace, name, provider, version}, "/")

@@ -1,13 +1,42 @@
 package httpexpect
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/moul/http2curl"
 )
+
+// CurlPrinter implements Printer. Uses http2curl to dump requests as
+// curl commands.
+type CurlPrinter struct {
+	logger Logger
+}
+
+// NewCurlPrinter returns a new CurlPrinter given a logger.
+func NewCurlPrinter(logger Logger) CurlPrinter {
+	return CurlPrinter{logger}
+}
+
+// Request implements Printer.Request.
+func (p CurlPrinter) Request(req *http.Request) {
+	if req != nil {
+		cmd, err := http2curl.GetCurlCommand(req)
+		if err != nil {
+			panic(err)
+		}
+		p.logger.Logf("%s", cmd.String())
+	}
+}
+
+// Response implements Printer.Response.
+func (CurlPrinter) Response(*http.Response, time.Duration) {
+}
 
 // CompactPrinter implements Printer. It prints requests in compact form.
 type CompactPrinter struct {
@@ -73,28 +102,40 @@ func (p DebugPrinter) Response(resp *http.Response, duration time.Duration) {
 	p.logger.Logf("%s %s\n%s", lines[0], duration, lines[1])
 }
 
-// CurlPrinter implements Printer. Uses http2curl to dump requests as
-// curl commands.
-type CurlPrinter struct {
-	logger Logger
-}
-
-// NewCurlPrinter returns a new CurlPrinter given a logger.
-func NewCurlPrinter(logger Logger) CurlPrinter {
-	return CurlPrinter{logger}
-}
-
-// Request implements Printer.Request.
-func (p CurlPrinter) Request(req *http.Request) {
-	if req != nil {
-		cmd, err := http2curl.GetCurlCommand(req)
-		if err != nil {
-			panic(err)
-		}
-		p.logger.Logf("%s", cmd.String())
+// WebsocketWrite implements WebsocketPrinter.WebsocketWrite.
+func (p DebugPrinter) WebsocketWrite(typ int, content []byte, closeCode int) {
+	b := &bytes.Buffer{}
+	fmt.Fprintf(b, "-> Sent: %s", wsMessageTypeName(typ))
+	if typ == websocket.CloseMessage {
+		fmt.Fprintf(b, " (%d)", closeCode)
 	}
+	fmt.Fprint(b, "\n")
+	if len(content) > 0 {
+		if typ == websocket.BinaryMessage {
+			fmt.Fprintf(b, "%v\n", content)
+		} else {
+			fmt.Fprintf(b, "%s\n", content)
+		}
+	}
+	fmt.Fprintf(b, "\n")
+	p.logger.Logf(b.String())
 }
 
-// Response implements Printer.Response.
-func (CurlPrinter) Response(*http.Response, time.Duration) {
+// WebsocketRead implements WebsocketPrinter.WebsocketRead.
+func (p DebugPrinter) WebsocketRead(typ int, content []byte, closeCode int) {
+	b := &bytes.Buffer{}
+	fmt.Fprintf(b, "<- Received: %s", wsMessageTypeName(typ))
+	if typ == websocket.CloseMessage {
+		fmt.Fprintf(b, " (%d)", closeCode)
+	}
+	fmt.Fprint(b, "\n")
+	if len(content) > 0 {
+		if typ == websocket.BinaryMessage {
+			fmt.Fprintf(b, "%v\n", content)
+		} else {
+			fmt.Fprintf(b, "%s\n", content)
+		}
+	}
+	fmt.Fprintf(b, "\n")
+	p.logger.Logf(b.String())
 }

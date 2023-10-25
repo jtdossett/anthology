@@ -65,7 +65,7 @@ func (binder Binder) RoundTrip(req *http.Request) (*http.Response, error) {
 		Request:    req,
 		StatusCode: recorder.Code,
 		Status:     http.StatusText(recorder.Code),
-		Header:     recorder.HeaderMap,
+		Header:     recorder.Result().Header,
 	}
 
 	if recorder.Flushed {
@@ -207,6 +207,10 @@ func (connNonTLS) LocalAddr() net.Addr {
 type connTLS struct {
 	connNonTLS
 	state *tls.ConnectionState
+}
+
+func (c connTLS) Handshake() error {
+	return nil
 }
 
 func (c connTLS) ConnectionState() tls.ConnectionState {

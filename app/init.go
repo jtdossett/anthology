@@ -2,18 +2,19 @@ package app
 
 import (
 	"fmt"
-	"github.com/go-ozzo/ozzo-routing"
+	"net/http"
+	"time"
+
+	routing "github.com/go-ozzo/ozzo-routing"
 	"github.com/go-ozzo/ozzo-routing/access"
 	"github.com/go-ozzo/ozzo-routing/fault"
 	"github.com/sirupsen/logrus"
-	"net/http"
-	"time"
 )
 
 func Init(logger *logrus.Logger) routing.Handler {
 	return func(rc *routing.Context) error {
 		now := time.Now()
-		rc.Response = &access.LogResponseWriter{rc.Response, http.StatusOK, 0}
+		rc.Response = &access.LogResponseWriter{ResponseWriter: rc.Response, Status: http.StatusOK, BytesWritten: 0}
 
 		ac := newRequestScope(now, logger, rc.Request)
 

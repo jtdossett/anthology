@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ajg/form"
+	"github.com/gorilla/websocket"
 )
 
 // StatusRange is enum for response status ranges.
@@ -37,11 +38,13 @@ const (
 
 // Response provides methods to inspect attached http.Response object.
 type Response struct {
-	chain   chain
-	resp    *http.Response
-	content []byte
-	cookies []*http.Cookie
-	time    time.Duration
+	config    Config
+	chain     chain
+	resp      *http.Response
+	content   []byte
+	cookies   []*http.Cookie
+	websocket *websocket.Conn
+	rtt       *time.Duration
 }
 
 // NewResponse returns a new Response given a reporter used to report
@@ -50,33 +53,47 @@ type Response struct {
 // Both reporter and response should not be nil. If response is nil,
 // failure is reported.
 //
-// If duration is given, it defines response time to be reported by
-// response.Duration().
+// If rtt is given, it defines response round-trip time to be reported
+// by response.RoundTripTime().
 func NewResponse(
-	reporter Reporter, response *http.Response, duration ...time.Duration) *Response {
-	var dr time.Duration
-	if len(duration) > 0 {
-		dr = duration[0]
+	reporter Reporter, response *http.Response, rtt ...time.Duration,
+) *Response {
+	var rttPtr *time.Duration
+	if len(rtt) > 0 {
+		rttPtr = &rtt[0]
 	}
-	return makeResponse(makeChain(reporter), response, dr)
+	return makeResponse(responseOpts{
+		chain:    makeChain(reporter),
+		response: response,
+		rtt:      rttPtr,
+	})
 }
 
-func makeResponse(
-	chain chain, response *http.Response, duration time.Duration) *Response {
+type responseOpts struct {
+	config    Config
+	chain     chain
+	response  *http.Response
+	websocket *websocket.Conn
+	rtt       *time.Duration
+}
+
+func makeResponse(opts responseOpts) *Response {
 	var content []byte
 	var cookies []*http.Cookie
-	if response != nil {
-		content = getContent(&chain, response)
-		cookies = response.Cookies()
+	if opts.response != nil {
+		content = getContent(&opts.chain, opts.response)
+		cookies = opts.response.Cookies()
 	} else {
-		chain.fail("expected non-nil response")
+		opts.chain.fail("expected non-nil response")
 	}
 	return &Response{
-		chain:   chain,
-		resp:    response,
-		content: content,
-		cookies: cookies,
-		time:    duration,
+		config:    opts.config,
+		chain:     opts.chain,
+		resp:      opts.response,
+		content:   content,
+		cookies:   cookies,
+		websocket: opts.websocket,
+		rtt:       opts.rtt,
 	}
 }
 
@@ -100,18 +117,26 @@ func (r *Response) Raw() *http.Response {
 	return r.resp
 }
 
-// Duration returns a new Number object that may be used to inspect
-// response time, in nanoseconds.
+// RoundTripTime returns a new Duration object that may be used to inspect
+// the round-trip time.
 //
-// Response time is a time interval starting just before request is sent
-// and ending right after response is received, retrieved from monotonic
-// clock source.
+// The returned duration is a time interval starting just before request is
+// sent and ending right after response is received (handshake finished for
+// WebSocket request), retrieved from a monotonic clock source.
 //
 // Example:
 //  resp := NewResponse(t, response, time.Duration(10000000))
-//  resp.Duration().Equal(10 * time.Millisecond)
+//  resp.RoundTripTime().Lt(10 * time.Millisecond)
+func (r *Response) RoundTripTime() *Duration {
+	return &Duration{r.chain, r.rtt}
+}
+
+// Deprecated: use RoundTripTime instead.
 func (r *Response) Duration() *Number {
-	return &Number{r.chain, float64(r.time)}
+	if r.rtt == nil {
+		return &Number{r.chain, 0}
+	}
+	return &Number{r.chain, float64(*r.rtt)}
 }
 
 // Status succeeds if response contains given status code.
@@ -263,6 +288,24 @@ func (r *Response) Cookie(name string) *Cookie {
 	return &Cookie{r.chain, nil}
 }
 
+// Websocket returns Websocket object that can be used to interact with
+// WebSocket server.
+//
+// May be called only if the WithWebsocketUpgrade was called on the request.
+// That is responsibility of the caller to explicitly close the websocket after use.
+//
+// Example:
+//  req := NewRequest(config, "GET", "/path")
+//  req.WithWebsocketUpgrade()
+//  ws := req.Expect().Websocket()
+//  defer ws.Disconnect()
+func (r *Response) Websocket() *Websocket {
+	if !r.chain.failed() && r.websocket == nil {
+		r.chain.fail("\nunexpected Websocket call for non-WebSocket response")
+	}
+	return makeWebsocket(r.config, r.chain, r.websocket)
+}
+
 // Body returns a new String object that may be used to inspect response body.
 //
 // Example:
@@ -321,6 +364,14 @@ func (r *Response) TransferEncoding(encoding ...string) *Response {
 	return r
 }
 
+// ContentOpts define parameters for matching the response content parameters.
+type ContentOpts struct {
+	// The media type Content-Type part, e.g. "application/json"
+	MediaType string
+	// The character set Content-Type part, e.g. "utf-8"
+	Charset string
+}
+
 // Text returns a new String object that may be used to inspect response body.
 //
 // Text succeeds if response contains "text/plain" Content-Type header
@@ -329,10 +380,13 @@ func (r *Response) TransferEncoding(encoding ...string) *Response {
 // Example:
 //  resp := NewResponse(t, response)
 //  resp.Text().Equal("hello, world!")
-func (r *Response) Text() *String {
+//  resp.Text(ContentOpts{
+//    MediaType: "text/plain",
+//  }).Equal("hello, world!")
+func (r *Response) Text(opts ...ContentOpts) *String {
 	var content string
 
-	if !r.chain.failed() && r.checkContentType("text/plain") {
+	if !r.chain.failed() && r.checkContentOpts(opts, "text/plain") {
 		content = string(r.content)
 	}
 
@@ -349,17 +403,20 @@ func (r *Response) Text() *String {
 // Example:
 //  resp := NewResponse(t, response)
 //  resp.Form().Value("foo").Equal("bar")
-func (r *Response) Form() *Object {
-	object := r.getForm()
+//  resp.Form(ContentOpts{
+//    MediaType: "application/x-www-form-urlencoded",
+//  }).Value("foo").Equal("bar")
+func (r *Response) Form(opts ...ContentOpts) *Object {
+	object := r.getForm(opts...)
 	return &Object{r.chain, object}
 }
 
-func (r *Response) getForm() map[string]interface{} {
+func (r *Response) getForm(opts ...ContentOpts) map[string]interface{} {
 	if r.chain.failed() {
 		return nil
 	}
 
-	if !r.checkContentType("application/x-www-form-urlencoded", "") {
+	if !r.checkContentOpts(opts, "application/x-www-form-urlencoded", "") {
 		return nil
 	}
 
@@ -383,17 +440,20 @@ func (r *Response) getForm() map[string]interface{} {
 // Example:
 //  resp := NewResponse(t, response)
 //  resp.JSON().Array().Elements("foo", "bar")
-func (r *Response) JSON() *Value {
-	value := r.getJSON()
+//  resp.JSON(ContentOpts{
+//    MediaType: "application/json",
+//  }).Array.Elements("foo", "bar")
+func (r *Response) JSON(opts ...ContentOpts) *Value {
+	value := r.getJSON(opts...)
 	return &Value{r.chain, value}
 }
 
-func (r *Response) getJSON() interface{} {
+func (r *Response) getJSON(opts ...ContentOpts) interface{} {
 	if r.chain.failed() {
 		return nil
 	}
 
-	if !r.checkContentType("application/json") {
+	if !r.checkContentOpts(opts, "application/json") {
 		return nil
 	}
 
@@ -420,8 +480,11 @@ func (r *Response) getJSON() interface{} {
 // Example:
 //  resp := NewResponse(t, response)
 //  resp.JSONP("myCallback").Array().Elements("foo", "bar")
-func (r *Response) JSONP(callback string) *Value {
-	value := r.getJSONP(callback)
+//  resp.JSONP("myCallback", ContentOpts{
+//    MediaType: "application/javascript",
+//  }).Array.Elements("foo", "bar")
+func (r *Response) JSONP(callback string, opts ...ContentOpts) *Value {
+	value := r.getJSONP(callback, opts...)
 	return &Value{r.chain, value}
 }
 
@@ -429,12 +492,12 @@ var (
 	jsonp = regexp.MustCompile(`^\s*([^\s(]+)\s*\((.*)\)\s*;*\s*$`)
 )
 
-func (r *Response) getJSONP(callback string) interface{} {
+func (r *Response) getJSONP(callback string, opts ...ContentOpts) interface{} {
 	if r.chain.failed() {
 		return nil
 	}
 
-	if !r.checkContentType("application/javascript") {
+	if !r.checkContentOpts(opts, "application/javascript") {
 		return nil
 	}
 
@@ -454,6 +517,20 @@ func (r *Response) getJSONP(callback string) interface{} {
 	}
 
 	return value
+}
+
+func (r *Response) checkContentOpts(
+	opts []ContentOpts, expectedType string, expectedCharset ...string,
+) bool {
+	if len(opts) != 0 {
+		if opts[0].MediaType != "" {
+			expectedType = opts[0].MediaType
+		}
+		if opts[0].Charset != "" {
+			expectedCharset = []string{opts[0].Charset}
+		}
+	}
+	return r.checkContentType(expectedType, expectedCharset...)
 }
 
 func (r *Response) checkContentType(expectedType string, expectedCharset ...string) bool {

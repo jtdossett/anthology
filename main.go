@@ -2,17 +2,21 @@ package main
 
 import (
 	"fmt"
-	"github.com/erikvanbrakel/anthology/api/v1"
+	"net/http"
+
+	v1 "github.com/erikvanbrakel/anthology/api/v1"
 	"github.com/erikvanbrakel/anthology/app"
 	"github.com/erikvanbrakel/anthology/registry"
 	"github.com/erikvanbrakel/anthology/services"
-	"github.com/go-ozzo/ozzo-routing"
+	routing "github.com/go-ozzo/ozzo-routing"
 	"github.com/go-ozzo/ozzo-routing/content"
 	"github.com/sirupsen/logrus"
-	"net/http"
 )
 
 func main() {
+
+	fmt.Println("Starting server ... loading config ... new ")
+
 	if err := app.LoadConfig(); err != nil {
 		panic(fmt.Errorf("invalid configuration: %s", err))
 	}
@@ -27,6 +31,9 @@ func main() {
 		break
 	case "filesystem":
 		r = registry.NewFilesystemRegistry(app.Config.FileSystem)
+		break
+	case "oras":
+		r = registry.NewOrasRegistry(app.Config.Oras)
 		break
 	}
 	http.Handle("/", buildRouter(logger, r))
